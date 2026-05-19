@@ -1,0 +1,17 @@
+# Rust
+plugin/target/
+plugin/Cargo.lock
+
+# Node
+bot/node_modules/
+bot/dist/
+
+# Secrets
+.env
+
+# OS
+.DS_Store
+*.Zone.Identifier
+
+# Aomi skills (local install, not project source)
+.agents/
