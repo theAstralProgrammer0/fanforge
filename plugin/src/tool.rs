@@ -12,25 +12,204 @@ impl DynAomiTool for LaunchFanCoin {
     const NAME: &'static str = "fanforge_launch_fan_coin";
     const DESCRIPTION: &'static str = "Launch a creator fan coin on Zora for a music creator. Takes the creator's name, ticker, and description — handles everything on-chain invisibly. Returns the live Zora link and coin address. Use when the creator says they want to launch a coin, start a fan economy, or monetize their fanbase.";
 
-    fn run(_app: &FanForgeApp, args: Self::Args, _ctx: DynToolCallCtx) -> Result<Value, String> {
-        let ticker = args.ticker.to_uppercase();
-        if ticker.len() < 3 || ticker.len() > 5 || !ticker.chars().all(|c| c.is_ascii_alphanumeric()) {
+    fn run_with_routes(
+        _app: &FanForgeApp,
+        args: Self::Args,
+        _ctx: DynToolCallCtx,
+    ) -> Result<ToolReturn, String> {
+        let ticker = args.ticker.trim().to_uppercase();
+        if ticker.len() < 3
+            || ticker.len() > 5
+            || !ticker.chars().all(|c| c.is_ascii_uppercase())
+        {
             return Err(format!(
-                "ticker_invalid: '{}' must be 3–5 alphanumeric characters",
+                "ticker_invalid: '{}' must be 3–5 letters (e.g. TEMI, VIBES)",
                 ticker
             ));
         }
 
-        // Phase 1 implementation: POST to Zora coin creation API
-        // For now return a structured stub so the plugin compiles and the
-        // preamble can describe the expected output shape.
-        // Full Zora on-chain coin creation is wired in Phase 1.
+        ToolReturn::route(json!({
+            "status": "setting_up",
+            "message": "Checking your fan economy wallet…"
+        }))
+        .next(|next| {
+            next.add::<host::GetAccountInfo>(json!({ "chain_id": 8453 }))
+                .bind_as("creator_wallet");
+        })
+        .after_named(
+            "fanforge_build_coin_tx",
+            json!({
+                "name": args.name,
+                "ticker": ticker,
+                "description": args.description,
+                "image_url": args.image_url,
+                "creator_telegram_id": args.creator_telegram_id,
+            }),
+        )
+        .awaits("creator_wallet")
+        .try_build()
+    }
+}
+
+// ── Tool 1b (internal): fanforge_build_coin_tx ────────────────────────────────
+
+pub(crate) struct BuildCoinTx;
+
+impl DynAomiTool for BuildCoinTx {
+    type App = FanForgeApp;
+    type Args = BuildCoinTxArgs;
+    const NAME: &'static str = "fanforge_build_coin_tx";
+    const DESCRIPTION: &'static str = "Internal tool — called automatically after wallet lookup during coin launch. Uploads coin metadata to IPFS, fetches Zora transaction calldata, and stages the on-chain deployment. Do not call directly.";
+
+    fn run_with_routes(
+        _app: &FanForgeApp,
+        args: Self::Args,
+        _ctx: DynToolCallCtx,
+    ) -> Result<ToolReturn, String> {
+        // Extract the creator wallet address from the route-injected get_account_info result
+        let creator_address = args
+            .creator_wallet
+            .as_str()
+            .or_else(|| args.creator_wallet.get("address").and_then(Value::as_str))
+            .or_else(|| {
+                args.creator_wallet
+                    .get("account")
+                    .and_then(|a| a.get("address"))
+                    .and_then(Value::as_str)
+            })
+            .ok_or("wallet_error: could not read your fan economy wallet address")?;
+
+        // Build metadata JSON and upload to IPFS
+        let metadata_json = json!({
+            "name": args.name,
+            "description": args.description,
+            "symbol": args.ticker,
+            "image": args.image_url.as_deref().unwrap_or(""),
+        });
+        let metadata_uri = ipfs_pin_json(&metadata_json)?;
+
+        // Fetch transaction calldata from Zora's REST API
+        let zora_req = json!({
+            "creator": creator_address,
+            "name": args.name,
+            "symbol": args.ticker,
+            "metadata": { "type": "RAW_URI", "uri": metadata_uri },
+            "currency": "CREATOR_COIN",
+            "chainId": 8453,
+        });
+        let calldata_resp = zora_post("/create/content", &zora_req)?;
+
+        let call = calldata_resp
+            .get("calls")
+            .and_then(Value::as_array)
+            .and_then(|arr| arr.first())
+            .ok_or("zora_error: Zora API returned no transaction calldata")?;
+
+        let to = call
+            .get("to")
+            .and_then(Value::as_str)
+            .ok_or("zora_error: missing transaction target address")?;
+        let data = call
+            .get("data")
+            .and_then(Value::as_str)
+            .ok_or("zora_error: missing transaction calldata")?;
+        let value_str = call.get("value").and_then(Value::as_str).unwrap_or("0");
+        let predicted_address = calldata_resp
+            .get("predictedCoinAddress")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+
+        ToolReturn::route(json!({
+            "status": "deploying",
+            "message": "Deploying your fan coin — please approve in your wallet.",
+        }))
+        .next(|next| {
+            next.add::<host::StageTx>(json!({
+                "to": to,
+                "data": { "raw": data },
+                "value": value_str,
+                "chain_id": 8453,
+            }))
+            .enforce(EnforcementPolicy::Stop, |enforce| {
+                enforce.add::<host::SimulateBatch>(json!({}));
+                enforce
+                    .add::<host::CommitTxs>(json!({ "aa_preference": "auto" }))
+                    .bind_as("transaction_hash");
+            });
+        })
+        .after_named(
+            "fanforge_finalize_launch",
+            json!({
+                "name": args.name,
+                "ticker": args.ticker,
+                "creator_telegram_id": args.creator_telegram_id,
+                "predicted_coin_address": predicted_address,
+            }),
+        )
+        .awaits("transaction_hash")
+        .try_build()
+    }
+}
+
+// ── Tool 1c (internal): fanforge_finalize_launch ──────────────────────────────
+
+pub(crate) struct FinalizeLaunch;
+
+impl DynAomiTool for FinalizeLaunch {
+    type App = FanForgeApp;
+    type Args = FinalizeLaunchArgs;
+    const NAME: &'static str = "fanforge_finalize_launch";
+    const DESCRIPTION: &'static str = "Internal tool — called automatically after the fan coin transaction is confirmed. Saves the coin record and returns the live Zora link. Do not call directly.";
+
+    fn run(
+        _app: &FanForgeApp,
+        args: Self::Args,
+        _ctx: DynToolCallCtx,
+    ) -> Result<Value, String> {
+        // Unwrap the tx hash from whatever commit_txs returns
+        let tx_hash = args
+            .transaction_hash
+            .as_str()
+            .or_else(|| {
+                args.transaction_hash
+                    .get("hash")
+                    .and_then(Value::as_str)
+            })
+            .or_else(|| {
+                args.transaction_hash
+                    .get("transactionHash")
+                    .and_then(Value::as_str)
+            })
+            .unwrap_or("pending");
+
+        let zora_url = format!(
+            "https://zora.co/coin/base:{}",
+            args.predicted_coin_address.to_lowercase()
+        );
+
+        // Best-effort: store coin in Supabase (don't fail the launch if DB is unavailable)
+        let _ = supabase_post(
+            "creator_coins",
+            &json!({
+                "creator_telegram_id": args.creator_telegram_id,
+                "coin_address": args.predicted_coin_address,
+                "ticker": args.ticker,
+                "name": args.name,
+                "transaction_hash": tx_hash,
+                "zora_url": zora_url,
+            }),
+        );
+
         ok(json!({
-            "status": "stub",
-            "message": "Coin launch wired in Phase 1",
+            "status": "launched",
             "coin_name": args.name,
-            "ticker": ticker,
-            "creator_telegram_id": args.creator_telegram_id,
+            "ticker": args.ticker,
+            "zora_url": zora_url,
+            "coin_address": args.predicted_coin_address,
+            "message": format!(
+                "Your {} fan coin (${}) is live! Share this link with your fans: {}",
+                args.name, args.ticker, zora_url
+            ),
         }))
     }
 }

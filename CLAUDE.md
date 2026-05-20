@@ -1,5 +1,5 @@
 # CLAUDE.md — FanForge
-> Last updated: 2026-05-19
+> Last updated: 2026-05-20
 
 ## 1. Project Identity
 
@@ -7,7 +7,7 @@
 - **Persona:** Temi Falola — 26-year-old Nigerian musician, 80k TikTok followers, zero crypto knowledge.
 - **Protocol:** Zora (on Base mainnet, chain ID 8453).
 - **Hackathon:** OpenPandora Early Forge — May 20–30 deadline.
-- **Stage:** Active build. Phase 0 (foundation) complete.
+- **Stage:** Active build. Phase 1 (coin launch) in progress.
 
 ## 2. Tech Stack
 
@@ -48,22 +48,38 @@
             └── start.ts       ← /start and /help command handler
 ```
 
-## 4. The 5 Agentic Tools
+## 4. The 7 Agentic Tools
 
-Every tool is in `plugin/src/tool.rs`. Tool handler: validate args → call service logic → return `ok(json!({...}))`.
+Every tool is in `plugin/src/tool.rs`. Tool handler: validate args → call service logic → return `ok(json!({...}))` or `ToolReturn::route(...)`.
 
 | Tool | NAME constant | Phase | Status |
 |------|--------------|-------|--------|
-| LaunchFanCoin | `fanforge_launch_fan_coin` | 1 | Stub — returns placeholder JSON |
+| LaunchFanCoin | `fanforge_launch_fan_coin` | 1 | Live — routes to get_account_info → BuildCoinTx |
+| BuildCoinTx *(internal)* | `fanforge_build_coin_tx` | 1 | Live — calls Zora /create/content + stages tx |
+| FinalizeLaunch *(internal)* | `fanforge_finalize_launch` | 1 | Live — stores in Supabase, returns Zora URL |
 | GetFanLeaderboard | `fanforge_get_fan_leaderboard` | 2 | Live — calls Zora `/coinHolders` |
 | CreateFanMission | `fanforge_create_fan_mission` | 3 | Live — writes to Supabase `fan_missions` |
 | DistributeRewards | `fanforge_distribute_rewards` | 3 | Live — reads holders + writes Supabase |
 | GetCreatorRecap | `fanforge_get_creator_recap` | 4 | Live — Zora `/coin` + Supabase missions |
 
+### Coin launch route chain (discovered Phase 1)
+```
+LaunchFanCoin
+  → route: get_account_info (binds "creator_wallet")
+  → after: fanforge_build_coin_tx (receives wallet injected)
+      → route: stage_tx (enforce: simulate_batch → commit_txs binds "transaction_hash")
+      → after: fanforge_finalize_launch (receives tx_hash injected)
+          → stores creator_coins in Supabase
+          → returns { zora_url, coin_address, ... }
+```
+- Zora coin creation: `POST https://api-sdk.zora.engineering/create/content` returns `{calls:[{to,data,value}], predictedCoinAddress}`
+- `data` for `stage_tx` must be in `{"raw": "0x..."}` object format
+- Internal tools have `DESCRIPTION` starting with "Internal tool — Do not call directly."
+
 ### Critical SDK facts (discovered Phase 0 — do not re-learn)
 - `AomiMessage.sender` is `"user" | "agent" | "system"`. NOT `.role`. NOT `"assistant"`.
 - `SessionOptions.app` selects the plugin. NOT `namespace`. The env var is `AOMI_APP`.
-- Tools must implement `DynAomiTool` trait with `run()` → `Result<Value, String>`.
+- Tools can override `run_with_routes` (returns `ToolReturn`) for routing flows; `run` (returns `Value`) for simple tools.
 - `dyn_aomi_app!` macro generates the C ABI exports (`aomi_create`, `aomi_manifest`, etc.).
 - Secrets declared in `dyn_aomi_app!` via `secrets = [...]` are injected at call time via `ctx.secrets`.
 
@@ -128,6 +144,7 @@ cd bot && npm run dev
 | `AOMI_APP` | no | Default: `fanforge`. Must match registered plugin name. |
 | `SUPABASE_URL` | yes | Free project at supabase.com |
 | `SUPABASE_ANON_KEY` | yes | Supabase project anon/public key |
+| `PINATA_JWT` | yes* | Pinata JWT for IPFS metadata upload. *Required for coin launch. Free at pinata.cloud. |
 | `ZORA_API_KEY` | no | All Zora reads work unauthenticated at lower rate limits |
 | `BASE_RPC_URL` | no | Default: `https://mainnet.base.org`. Used for direct on-chain reads. |
 
@@ -135,8 +152,23 @@ Single source of truth: repo-root `.env`. Never commit `.env`. Run all commands 
 
 ## 8. Supabase Schema
 
-Run these in the Supabase SQL editor (or via the REST API) before Phase 3:
+Apply manually via Supabase dashboard SQL editor.
 
+**Phase 1 (required before coin launch testing):**
+```sql
+CREATE TABLE creator_coins (
+  id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  creator_telegram_id TEXT NOT NULL,
+  coin_address        TEXT NOT NULL UNIQUE,
+  ticker              TEXT NOT NULL,
+  name                TEXT NOT NULL,
+  transaction_hash    TEXT NOT NULL,
+  zora_url            TEXT NOT NULL,
+  created_at          TIMESTAMPTZ DEFAULT NOW()
+);
+```
+
+**Phase 3 (required before mission testing):**
 ```sql
 CREATE TABLE fan_missions (
   id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -158,14 +190,12 @@ CREATE TABLE reward_distributions (
 );
 ```
 
-No migration runner — apply manually via Supabase dashboard SQL editor. Both tables must exist before testing Phase 3 tools.
-
 ## 9. Phase Status
 
 | Phase | Name | Status | Gate |
 |-------|------|--------|------|
 | 0 | Foundation | ✅ complete | `cargo check` + `tsc --noEmit` both pass |
-| 1 | Coin Launch | 🔲 next | Telegram msg → live Zora coin link |
+| 1 | Coin Launch | 🔄 in progress | Telegram msg → live Zora coin link |
 | 2 | Fan Intelligence | 🔲 | `get_fan_leaderboard` live with real data |
 | 3 | Fan Missions | 🔲 | Mission creates, rewards distribute |
 | 4 | Recap & Automation | 🔲 | Daily cron push + on-demand recap |

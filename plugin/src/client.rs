@@ -11,6 +11,7 @@ pub(crate) struct FanForgeApp;
 // ── HTTP helpers ──────────────────────────────────────────────────────────────
 
 const ZORA_API_BASE: &str = "https://api-sdk.zora.engineering";
+const PINATA_API: &str = "https://api.pinata.cloud";
 
 pub(crate) fn zora_get(path_with_query: &str) -> Result<Value, String> {
     let url = format!("{ZORA_API_BASE}{path_with_query}");
@@ -72,6 +73,48 @@ pub(crate) fn zora_post(path: &str, body: &Value) -> Result<Value, String> {
 
     serde_json::from_str(&text)
         .map_err(|e| format!("[fanforge] Zora POST decode failed: {e}"))
+}
+
+/// Upload a JSON value to IPFS via Pinata and return the `ipfs://` URI.
+pub(crate) fn ipfs_pin_json(content: &Value) -> Result<String, String> {
+    let jwt = std::env::var("PINATA_JWT")
+        .map_err(|_| "[fanforge] PINATA_JWT not set — cannot upload coin metadata to IPFS")?;
+
+    let pin_body = serde_json::json!({
+        "pinataContent": content,
+        "pinataMetadata": { "name": "fanforge-coin-metadata" },
+    });
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("[fanforge] failed to build HTTP client: {e}"))?;
+
+    let resp = client
+        .post(format!("{PINATA_API}/pinning/pinJSONToIPFS"))
+        .header("Authorization", format!("Bearer {jwt}"))
+        .json(&pin_body)
+        .send()
+        .map_err(|e| format!("[fanforge] Pinata upload failed: {e}"))?;
+
+    let status = resp.status();
+    let body = resp.text().unwrap_or_default();
+    if !status.is_success() {
+        return Err(format!(
+            "[fanforge] Pinata returned {status}: {}",
+            &body[..body.len().min(300)]
+        ));
+    }
+
+    let parsed: Value = serde_json::from_str(&body)
+        .map_err(|e| format!("[fanforge] Pinata response decode failed: {e}"))?;
+
+    let hash = parsed
+        .get("IpfsHash")
+        .and_then(Value::as_str)
+        .ok_or("[fanforge] Pinata response missing IpfsHash field")?;
+
+    Ok(format!("ipfs://{hash}"))
 }
 
 /// Minimal percent-encoder for URL query values.
@@ -174,6 +217,39 @@ pub(crate) struct LaunchFanCoinArgs {
     /// Optional IPFS or HTTPS URL for the coin's cover art.
     #[serde(default)]
     pub image_url: Option<String>,
+}
+
+/// Args for the internal BuildCoinTx tool (called via route after get_account_info).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct BuildCoinTxArgs {
+    /// Coin display name (e.g. "Temi's Fan Coin").
+    pub name: String,
+    /// Ticker symbol, already normalized to 3–5 uppercase letters (e.g. "TEMI").
+    pub ticker: String,
+    /// Plain-English description of the coin.
+    pub description: String,
+    /// Optional HTTPS or IPFS URL for the coin's cover art.
+    #[serde(default)]
+    pub image_url: Option<String>,
+    /// Creator's Telegram ID.
+    pub creator_telegram_id: String,
+    /// Injected by the Aomi route system from the get_account_info result.
+    pub creator_wallet: Value,
+}
+
+/// Args for the internal FinalizeLaunch tool (called via route after commit_txs).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct FinalizeLaunchArgs {
+    /// Coin display name.
+    pub name: String,
+    /// Ticker symbol.
+    pub ticker: String,
+    /// Creator's Telegram ID.
+    pub creator_telegram_id: String,
+    /// Predicted coin address from the Zora API (deterministic pre-deploy address).
+    pub predicted_coin_address: String,
+    /// Injected by the Aomi route system from the commit_txs result.
+    pub transaction_hash: Value,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

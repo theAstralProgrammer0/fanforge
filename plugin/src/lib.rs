@@ -49,6 +49,12 @@ const SECRET_SUPABASE_ANON_KEY: Secret = Secret::new(
     true,
 );
 
+const SECRET_PINATA_JWT: Secret = Secret::new(
+    "PINATA_JWT",
+    "Pinata API JWT for uploading coin metadata JSON to IPFS. Required for coin launch.",
+    true,
+);
+
 dyn_aomi_app!(
     app = client::FanForgeApp,
     name = "fanforge",
@@ -56,11 +62,13 @@ dyn_aomi_app!(
     preamble = PREAMBLE,
     tools = [
         tool::LaunchFanCoin,
+        tool::BuildCoinTx,
+        tool::FinalizeLaunch,
         tool::GetFanLeaderboard,
         tool::CreateFanMission,
         tool::DistributeRewards,
         tool::GetCreatorRecap,
     ],
-    secrets = [SECRET_ZORA_API_KEY, SECRET_SUPABASE_URL, SECRET_SUPABASE_ANON_KEY],
+    secrets = [SECRET_ZORA_API_KEY, SECRET_SUPABASE_URL, SECRET_SUPABASE_ANON_KEY, SECRET_PINATA_JWT],
     namespaces = ["evm-core"]
 );
