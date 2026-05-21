@@ -1,7 +1,5 @@
 import { Session } from "@aomi-labs/client";
 
-const AOMI_BASE_URL = process.env.AOMI_BASE_URL ?? "https://api.aomi.dev";
-const AOMI_APP = process.env.AOMI_APP ?? "fanforge";
 
 // One Aomi session per Telegram user, keyed by their Telegram user ID.
 const sessions = new Map<number, Session>();
@@ -10,11 +8,14 @@ export function getOrCreateSession(telegramUserId: number): Session {
   const existing = sessions.get(telegramUserId);
   if (existing) return existing;
 
+  const baseUrl = process.env.AOMI_BASE_URL ?? "https://api.aomi.dev";
+  const app = process.env.AOMI_APP ?? "fanforge";
+  const sessionId = crypto.randomUUID();
   const session = new Session(
-    { baseUrl: AOMI_BASE_URL },
+    { baseUrl },
     {
-      sessionId: `tg-${telegramUserId}`,
-      app: AOMI_APP,
+      sessionId,
+      app,
       apiKey: process.env.AOMI_API_KEY,
     },
   );
