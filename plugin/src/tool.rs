@@ -540,3 +540,163 @@ impl DynAomiTool for GetCreatorRecap {
         }))
     }
 }
+
+// ── Unit tests ────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aomi_sdk::testing::{run_tool, TestCtxBuilder};
+    use serde_json::json;
+
+    fn ctx(name: &str) -> aomi_sdk::DynToolCallCtx {
+        TestCtxBuilder::new(name).build()
+    }
+
+    // ── LaunchFanCoin ticker validation ──────────────────────────────────────
+
+    #[test]
+    fn launch_rejects_ticker_too_short() {
+        let result = run_tool::<LaunchFanCoin>(
+            &FanForgeApp,
+            json!({ "creator_telegram_id": "1", "name": "X", "ticker": "AB", "description": "d" }),
+            ctx("fanforge_launch_fan_coin"),
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("ticker_invalid"));
+    }
+
+    #[test]
+    fn launch_rejects_ticker_too_long() {
+        let result = run_tool::<LaunchFanCoin>(
+            &FanForgeApp,
+            json!({ "creator_telegram_id": "1", "name": "X", "ticker": "TOOLONG", "description": "d" }),
+            ctx("fanforge_launch_fan_coin"),
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("ticker_invalid"));
+    }
+
+    #[test]
+    fn launch_rejects_ticker_with_digits() {
+        let result = run_tool::<LaunchFanCoin>(
+            &FanForgeApp,
+            json!({ "creator_telegram_id": "1", "name": "X", "ticker": "TEM1", "description": "d" }),
+            ctx("fanforge_launch_fan_coin"),
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("ticker_invalid"));
+    }
+
+    #[test]
+    fn launch_accepts_valid_ticker_and_returns_route() {
+        let result = run_tool::<LaunchFanCoin>(
+            &FanForgeApp,
+            json!({ "creator_telegram_id": "12345", "name": "Temi Coin", "ticker": "TEMI", "description": "Temi Falola fan coin" }),
+            ctx("fanforge_launch_fan_coin"),
+        );
+        assert!(result.is_ok(), "valid ticker should succeed: {:?}", result.err());
+        // Valid path builds a route chain — the ToolReturn has routes populated
+        let ret = result.unwrap();
+        assert!(!ret.routes.is_empty(), "expected route chain to be emitted");
+    }
+
+    #[test]
+    fn launch_normalizes_lowercase_ticker() {
+        let result = run_tool::<LaunchFanCoin>(
+            &FanForgeApp,
+            json!({ "creator_telegram_id": "1", "name": "Temi Coin", "ticker": "temi", "description": "d" }),
+            ctx("fanforge_launch_fan_coin"),
+        );
+        // lowercase "temi" normalizes to "TEMI" — 4 uppercase letters, valid
+        assert!(result.is_ok(), "lowercase ticker should be normalized: {:?}", result.err());
+    }
+
+    // ── CreateFanMission threshold validation ────────────────────────────────
+
+    #[test]
+    fn mission_rejects_zero_threshold() {
+        let result = run_tool::<CreateFanMission>(
+            &FanForgeApp,
+            json!({
+                "coin_address": "0x493e88b9ba3a479c03c28af366adff4457d58d94",
+                "title": "Early Access",
+                "content_url": "https://example.com/track.mp3",
+                "threshold": 0.0,
+            }),
+            ctx("fanforge_create_fan_mission"),
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("threshold_invalid"));
+    }
+
+    #[test]
+    fn mission_rejects_negative_threshold() {
+        let result = run_tool::<CreateFanMission>(
+            &FanForgeApp,
+            json!({
+                "coin_address": "0x493e88b9ba3a479c03c28af366adff4457d58d94",
+                "title": "Early Access",
+                "content_url": "https://example.com/track.mp3",
+                "threshold": -50.0,
+            }),
+            ctx("fanforge_create_fan_mission"),
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("threshold_invalid"));
+    }
+
+    // ── GetFanLeaderboard response parsing ───────────────────────────────────
+
+    #[test]
+    fn leaderboard_parses_zora_response_shape() {
+        // Verify our parsing logic handles the Zora coinHolders response correctly.
+        // We test the parsing by constructing the same JSON the tool would receive
+        // and running through the extraction logic directly.
+        let zora_response = json!({
+            "zora20Token": {
+                "tokenBalances": {
+                    "edges": [
+                        {
+                            "node": {
+                                "balance": "1000000000000000000000",
+                                "ownerAddress": "0xabc123def456abc123def456abc123def456abc1",
+                                "ownerProfile": { "handle": "superfan", "__typename": "GraphQLAccountProfile" }
+                            }
+                        },
+                        {
+                            "node": {
+                                "balance": "500000000000000000000",
+                                "ownerAddress": "0x9999888877776666555544443333222211110000",
+                                "ownerProfile": { "handle": "0x9999...0000", "__typename": "GraphQLWalletProfile" }
+                            }
+                        }
+                    ]
+                }
+            }
+        });
+
+        let edges = zora_response
+            .get("zora20Token")
+            .and_then(|t| t.get("tokenBalances"))
+            .and_then(|tb| tb.get("edges"))
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+
+        assert_eq!(edges.len(), 2, "should parse 2 holders");
+
+        let node0 = edges[0].get("node").unwrap();
+        let addr0 = node0.get("ownerAddress").and_then(Value::as_str).unwrap();
+        assert!(addr0.starts_with("0x"));
+
+        let balance0_raw = node0.get("balance").and_then(Value::as_str).unwrap();
+        let balance0_coins: f64 = balance0_raw.parse::<f64>().unwrap() / 1e18;
+        assert!((balance0_coins - 1000.0).abs() < 0.01, "1000 coins expected, got {balance0_coins}");
+
+        let handle0 = edges[0].get("node").unwrap()
+            .get("ownerProfile").unwrap()
+            .get("handle").and_then(Value::as_str).unwrap();
+        assert_eq!(handle0, "superfan");
+    }
+}

@@ -3,7 +3,7 @@ import { dirname, resolve } from "path";
 import { fileURLToPath } from "url";
 config({ path: resolve(dirname(fileURLToPath(import.meta.url)), "../../.env") });
 
-import { Bot } from "grammy";
+import { Bot, type Context } from "grammy";
 import { handleStart } from "./handlers/start.js";
 import { getOrCreateSession } from "./session.js";
 
@@ -28,38 +28,23 @@ bot.on("message:text", async (ctx) => {
 
   const text = ctx.message.text;
 
-  // Show a typing indicator while Aomi processes
   await ctx.api.sendChatAction(ctx.chat.id, "typing");
 
   try {
     const session = getOrCreateSession(userId);
     const result = await session.send(text);
 
-    // Aomi returns an array of message objects; surface the last assistant message
-    const assistantMessages = result.messages.filter(
-      (m) => m.sender === "agent",
-    );
+    const agentMessages = result.messages.filter((m) => m.sender === "agent");
 
-    if (assistantMessages.length === 0) {
-      await ctx.reply("Still thinking... try again in a moment.");
+    if (agentMessages.length === 0) {
+      await ctx.reply("Still thinking… try again in a moment.");
       return;
     }
 
-    const lastMessage = assistantMessages[assistantMessages.length - 1];
-    const content =
-      typeof lastMessage.content === "string"
-        ? lastMessage.content
-        : JSON.stringify(lastMessage.content, null, 2);
+    const lastMessage = agentMessages[agentMessages.length - 1];
+    const content = extractText(lastMessage.content);
 
-    // Telegram message limit is 4096 chars; split if needed
-    if (content.length <= 4096) {
-      await ctx.reply(content, { parse_mode: "Markdown" });
-    } else {
-      const chunks = content.match(/.{1,4000}/gs) ?? [content];
-      for (const chunk of chunks) {
-        await ctx.reply(chunk);
-      }
-    }
+    await sendChunked(ctx, content);
   } catch (err) {
     console.error("Aomi session error:", err);
     await ctx.reply(
@@ -67,6 +52,80 @@ bot.on("message:text", async (ctx) => {
     );
   }
 });
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+/**
+ * Extract a human-readable string from whatever Aomi sends back.
+ * Tool results arrive as JSON objects with a "message" field or as plain strings.
+ */
+function extractText(content: unknown): string {
+  if (typeof content === "string") {
+    // Strip wrapping JSON if the agent emitted a raw tool result string
+    try {
+      const parsed = JSON.parse(content);
+      return extractText(parsed);
+    } catch {
+      return content.trim();
+    }
+  }
+
+  if (Array.isArray(content)) {
+    // Multi-part content — join text parts
+    return content
+      .map((part) => {
+        if (typeof part === "object" && part !== null && "text" in part) {
+          return String((part as { text: unknown }).text);
+        }
+        return extractText(part);
+      })
+      .join("\n")
+      .trim();
+  }
+
+  if (typeof content === "object" && content !== null) {
+    const obj = content as Record<string, unknown>;
+    // Prefer a human-readable "message" field if the plugin returned one
+    if (typeof obj.message === "string") return obj.message.trim();
+    if (typeof obj.text === "string") return obj.text.trim();
+    if (typeof obj.summary === "string") return obj.summary.trim();
+    // Fall back to pretty-printing — but strip the internal "source" field
+    const { source: _source, ...rest } = obj;
+    return JSON.stringify(rest, null, 2);
+  }
+
+  return String(content);
+}
+
+/**
+ * Send a message, splitting at 4000 chars if needed.
+ * Falls back to plain text if Markdown parse fails.
+ */
+async function sendChunked(ctx: Context, text: string): Promise<void> {
+  const chunks = chunkText(text, 4000);
+  for (const chunk of chunks) {
+    try {
+      await ctx.reply(chunk, { parse_mode: "Markdown" });
+    } catch {
+      // Markdown parse error — retry as plain text
+      await ctx.reply(chunk);
+    }
+  }
+}
+
+function chunkText(text: string, maxLen: number): string[] {
+  if (text.length <= maxLen) return [text];
+  const chunks: string[] = [];
+  let remaining = text;
+  while (remaining.length > maxLen) {
+    // Try to break at a newline near the boundary
+    const breakAt = remaining.lastIndexOf("\n", maxLen) || maxLen;
+    chunks.push(remaining.slice(0, breakAt).trim());
+    remaining = remaining.slice(breakAt).trim();
+  }
+  if (remaining) chunks.push(remaining);
+  return chunks;
+}
 
 // ── Error handling ────────────────────────────────────────────────────────────
 
