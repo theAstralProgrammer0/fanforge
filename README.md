@@ -10,7 +10,7 @@ Built for the **OpenPandora Early Forge hackathon** (deadline June 5, 2026).
 
 ## Demo
 
-> Bot: [@FanForgeBot](https://t.me/FanForgeBot) on Telegram
+> Bot: [@fan_forge_bot](https://t.me/fan_forge_bot) on Telegram
 
 Send `/start` to begin. The bot is currently running on the `default` Aomi app pending activation of the `fanforge` plugin on the Aomi backend. Once activated, the full coin launch → mission → recap flow goes live.
 
