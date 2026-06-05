@@ -1,0 +1,33 @@
+# Rust
+plugin/target/
+plugin/Cargo.lock
+
+# AI
+CLAUDE.md
+.claude
+.claude-hashes
+GOAL.md
+handoff.md
+
+# Node
+bot/node_modules/
+bot/dist/
+
+# Doc
+docs/Principle_Of_Operation
+
+# Secrets
+.env
+
+# OS
+.DS_Store
+*.Zone.Identifier
+
+# Aomi skills (local install, not project source)
+.agents/
+
+# aomi-git deploy artifacts (deployment.json written by the CLI, not source)
+plugin/.aomi/
+.aomi/
+
+.ideation

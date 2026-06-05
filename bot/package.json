@@ -1,0 +1,25 @@
+{
+  "name": "fanforge-bot",
+  "version": "0.1.0",
+  "description": "FanForge Telegram bot — fan economy for music creators",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check src/"
+  },
+  "dependencies": {
+    "@aomi-labs/client": "^0.1.37",
+    "grammy": "^1.43.0",
+    "dotenv": "^16.5.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.4",
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.0"
+  }
+}
